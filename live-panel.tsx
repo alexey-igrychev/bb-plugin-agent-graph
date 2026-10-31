@@ -20,9 +20,9 @@ import {
   entryBody,
   filterEntries,
   formatEntryTime,
-  isAtBottom,
   LIVE_FILTER_LABEL,
   type LiveFilter,
+  releasesFollow,
 } from "./live-view";
 import type { LiveEntry } from "./live-types";
 import { Button } from "@/components/ui/button";
@@ -111,8 +111,8 @@ export function LivePanel({
   const cursorRef = useRef<string | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
-  // Following scrolls the body itself; that scroll must not look manual.
-  const autoScrollRef = useRef(false);
+  // Where the panel last scrolled itself, so its own scroll events are known.
+  const autoScrollTop = useRef(0);
 
   // A new target starts from scratch. Declared before the poll effect so the
   // cursor is cleared before the next read uses it.
@@ -162,8 +162,8 @@ export function LivePanel({
     if (!follow) return;
     const el = bodyRef.current;
     if (!el) return;
-    autoScrollRef.current = true;
     el.scrollTop = el.scrollHeight;
+    autoScrollTop.current = el.scrollTop;
   }, [follow, state.text, state.entries, expanded]);
 
   useEffect(() => {
@@ -298,11 +298,12 @@ export function LivePanel({
         aria-live="off"
         data-testid="live-body"
         onScroll={(event) => {
-          if (autoScrollRef.current) {
-            autoScrollRef.current = false;
-            return;
-          }
-          if (follow && !isAtBottom(event.currentTarget)) setFollow(false);
+          const released = releasesFollow({
+            follow,
+            scrollTop: event.currentTarget.scrollTop,
+            autoScrollTop: autoScrollTop.current,
+          });
+          if (released) setFollow(false);
         }}
         className={cn(
           "overflow-auto rounded-md border border-border bg-muted/40",

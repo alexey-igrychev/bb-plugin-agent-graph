@@ -373,6 +373,19 @@ test("a worker's processes hang under it as tool nodes, root before child, and n
   assert.doesNotMatch(JSON.stringify(result.nodes), /\.jsonl|\/storage\//);
 });
 
+test("host log failures never expose a server path through the public live RPC", async () => {
+  const privatePath=processLog("private-missing");
+  const {harness,loaded}=host({workers:[piWorker({id:"task-1",processes:[piProcess({id:"private-missing"})]})]});
+  await loaded;
+  await assert.rejects(harness.callRpc("live",{threadId:PI_THREAD,itemId:null,workerId:"task-1",processId:"private-missing",cursor:null}),error=>{
+    assert.ok(error instanceof Error);
+    assert.ok(!error.message.includes(privatePath),"private host file path must not be exposed");
+    assert.ok(!error.message.includes("/storage/"));
+    assert.match(error.message,/unavailable|read|captured/i);
+    return true;
+  });
+});
+
 test("a process still running under a finished worker wakes the thread, not the worker", async () => {
   const workers = [
     piWorker({

@@ -62,14 +62,12 @@ export const emptyLiveState: LiveState = {
   updatedAt: null,
 };
 
-const tail = (text: string): string =>
-  text.length > LIVE_ENTRY_TEXT_CAP ? text.slice(text.length - LIVE_ENTRY_TEXT_CAP) : text;
-
 /**
  * Merges a page's entries into the retained ones: a delta extends the entry it
  * names, anything else replaces it, and the oldest are dropped to stay under
  * the caps. Deltas almost always land on the newest entry, so the common case
- * costs one comparison however long the stream runs.
+ * costs one comparison however long the stream runs. `dropped` covers every
+ * way output is lost: entries pushed off the front, and one entry's clipped head.
  */
 function foldEntries(
   retained: LiveEntry[],
@@ -77,6 +75,12 @@ function foldEntries(
   incoming: readonly LiveEntry[],
 ): { entries: LiveEntry[]; chars: number; dropped: boolean } {
   if (incoming.length === 0) return { entries: retained, chars, dropped: false };
+  let dropped = false;
+  const tail = (text: string): string => {
+    if (text.length <= LIVE_ENTRY_TEXT_CAP) return text;
+    dropped = true;
+    return text.slice(text.length - LIVE_ENTRY_TEXT_CAP);
+  };
   const entries = [...retained];
   let total = chars;
   for (const next of incoming) {
@@ -105,7 +109,6 @@ function foldEntries(
         : { ...fields, text };
     total += text.length - current.text.length;
   }
-  let dropped = false;
   while (entries.length > LIVE_ENTRY_CAP || total > LIVE_TEXT_CAP) {
     total -= entries.shift()!.text.length;
     dropped = true;

@@ -8,9 +8,9 @@ import {
   entryBody,
   filterEntries,
   formatEntryTime,
-  isAtBottom,
   LIVE_FILTER_LABEL,
   liveCaptionFor,
+  releasesFollow,
   type LiveFilter,
 } from "../live-view.ts";
 
@@ -121,12 +121,17 @@ test("copied text carries what is on screen, with time, role and outcome", () =>
   assert.equal(copyTextFor([]), "");
 });
 
-test("following stays engaged only while the view is at the bottom", () => {
-  assert.equal(isAtBottom({ scrollTop: 900, scrollHeight: 1000, clientHeight: 100 }), true);
-  assert.equal(isAtBottom({ scrollTop: 880, scrollHeight: 1000, clientHeight: 100 }), true);
-  assert.equal(isAtBottom({ scrollTop: 400, scrollHeight: 1000, clientHeight: 100 }), false);
-  // A view shorter than its box is always at the bottom.
-  assert.equal(isAtBottom({ scrollTop: 0, scrollHeight: 80, clientHeight: 100 }), true);
+test("following is released by the reader's scroll, not by the panel's own", () => {
+  // The panel last pinned the view at 900.
+  const pinned = { follow: true, autoScrollTop: 900 };
+  assert.equal(releasesFollow({ ...pinned, scrollTop: 400 }), true);
+  assert.equal(releasesFollow({ ...pinned, scrollTop: 880 }), false, "24px of slack");
+  assert.equal(releasesFollow({ ...pinned, scrollTop: 900 }), false);
+  // New output arrived and the view grew below the pin: not the reader moving.
+  assert.equal(releasesFollow({ ...pinned, scrollTop: 1500 }), false);
+  assert.equal(releasesFollow({ ...pinned, follow: false, scrollTop: 0 }), false);
+  // Nothing pinned yet, so nothing can read as scrolling away.
+  assert.equal(releasesFollow({ follow: true, autoScrollTop: 0, scrollTop: 0 }), false);
 });
 
 test("the caption keeps the node's identity beside the output", () => {

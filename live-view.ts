@@ -105,15 +105,20 @@ export function liveCaptionFor(node: GraphNode): string {
   return [node.label, detail].filter((part) => part !== "").join(" · ");
 }
 
-/** Slack for "at the bottom", so a rounded scroll position still counts. */
+/** Slack for "the reader moved away", so a rounded scroll position is ignored. */
 const BOTTOM_SLACK_PX = 24;
 
-export function isAtBottom(metrics: {
+/**
+ * Whether a scroll event means the reader wants to stop following the tail.
+ * Compared against the position the panel itself last scrolled to, not against
+ * the bottom: new output grows the view below that position, so a page landing
+ * mid-scroll can never be mistaken for the reader scrolling up, and the first
+ * genuine scroll up is never swallowed.
+ */
+export function releasesFollow(input: {
+  follow: boolean;
   scrollTop: number;
-  scrollHeight: number;
-  clientHeight: number;
+  autoScrollTop: number;
 }): boolean {
-  return (
-    metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= BOTTOM_SLACK_PX
-  );
+  return input.follow && input.scrollTop < input.autoScrollTop - BOTTOM_SLACK_PX;
 }

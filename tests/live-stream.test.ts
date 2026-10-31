@@ -165,6 +165,17 @@ test("one giant entry keeps its tail instead of growing without bound", () => {
   assert.equal(only.text.length, LIVE_ENTRY_TEXT_CAP);
   assert.equal(only.text.endsWith("z"), true);
   assert.equal(only.text.includes("start"), false, "the head must be dropped, not the tail");
+  assert.equal(state.truncated, true, "clipping one entry is still lost output; say so");
+});
+
+test("a single oversized entry reports the loss even when little is retained", () => {
+  const state = applyLivePage(
+    emptyLiveState,
+    page({ entries: [entry({ text: "m" + "x".repeat(LIVE_ENTRY_TEXT_CAP) })] }),
+  );
+  assert.equal(state.entries[0]!.text.length, LIVE_ENTRY_TEXT_CAP);
+  assert.equal(state.entries[0]!.text.startsWith("m"), false, "the leading marker is gone");
+  assert.equal(state.truncated, true);
 });
 
 test("a large stream stays bounded and cheap to fold", () => {
@@ -206,15 +217,33 @@ test("a command entry keeps its command while its output streams in", () => {
       ],
     }),
   );
+  assert.deepEqual(finished.entries[0]!.command, "npm test");
   assert.equal(finished.entries.length, 1);
-  assert.deepEqual(
-    {
-      command: finished.entries[0]!.command,
-      text: finished.entries[0]!.text,
-      status: finished.entries[0]!.status,
-      exitCode: finished.entries[0]!.exitCode,
-    },
-    { command: "npm test", text: "58 passing", status: "failed", exitCode: 1 },
+  assert.equal(finished.entries[0]!.text, "58 passing");
+  assert.equal(finished.entries[0]!.status, "failed");
+  assert.equal(finished.entries[0]!.exitCode, 1);
+});
+
+test("a delta keeps the time the entry first appeared", () => {
+  const started = applyLivePage(
+    emptyLiveState,
+    page({ entries: [entry({ id: "c1", at: 1000, text: "a" })] }),
+  );
+  const later = applyLivePage(
+    started,
+    page({ entries: [entry({ id: "c1", at: 9000, text: "b", append: true })] }),
+  );
+  assert.equal(later.entries[0]!.at, 1000, "a delta must not restamp the entry");
+  assert.equal(later.entries[0]!.text, "ab");
+  // An entry that arrived without a time takes the first one a delta brings.
+  const unknown = applyLivePage(
+    emptyLiveState,
+    page({ entries: [entry({ id: "c2", at: null, text: "a" })] }),
+  );
+  assert.equal(
+    applyLivePage(unknown, page({ entries: [entry({ id: "c2", at: 9000, text: "b", append: true })] }))
+      .entries[0]!.at,
+    9000,
   );
 });
 
