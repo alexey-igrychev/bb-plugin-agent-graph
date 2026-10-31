@@ -239,9 +239,12 @@ export function createLiveReader(api: LiveApi, readPi: (threadId: string) => Pro
     const cursor = decoded.cursor;
     let reset = decoded.reset;
     let warning: string | null = null;
+    const notice = (text: string | undefined) => {
+      if (text && !warning?.includes(text)) warning = warning ? `${warning} ${text}` : text;
+    };
     const bounded = (text: string) => {
       if (text.length <= TEXT_LIMIT) return text;
-      warning = "A large log entry was truncated; only its tail is shown.";
+      notice("A large log entry was truncated; only its tail is shown.");
       return `[entry truncated]\n${text.slice(-TEXT_LIMIT)}`;
     };
     if (input.workerId) {
@@ -255,9 +258,6 @@ export function createLiveReader(api: LiveApi, readPi: (threadId: string) => Pro
         const path = root?.logFile ?? process.logFile;
         cursor.source = "process";
         const shared = process.outputCapture === "shared" || process.rootId !== process.id;
-        const notice = (text: string | undefined) => {
-          if (text && !warning?.includes(text)) warning = warning ? `${warning} ${text}` : text;
-        };
         if (shared) notice("Shared root-command output: separate per-child stdout/stderr is not available.");
         notice(process.warning);
         if (root?.warning !== process.warning) notice(root?.warning);
@@ -328,10 +328,11 @@ export function createLiveReader(api: LiveApi, readPi: (threadId: string) => Pro
         try {
           const row = record(JSON.parse(line));
           if (row.customType === "pi-pi-truncated") {
-            warning = "pi-pi stopped recording this transcript at its size limit.";
-            lines.push(`\n[${warning}]\n`);
-            entries.push({id:`cap:${cursor.offset}`,at:null,kind:"system",text:warning,status:"truncated"});
-            outputSize += warning.length;
+            const capped = "pi-pi stopped recording this transcript at its size limit.";
+            notice(capped);
+            lines.push(`\n[${capped}]\n`);
+            entries.push({id:`cap:${cursor.offset}`,at:null,kind:"system",text:capped,status:"truncated"});
+            outputSize += capped.length;
           }
           if (row.type !== "message") continue;
           const message = record(row.message);
@@ -342,7 +343,7 @@ export function createLiveReader(api: LiveApi, readPi: (threadId: string) => Pro
             lines.push(text);
             outputSize += text.length;
           }
-        } catch { warning = "A malformed transcript entry was skipped."; }
+        } catch { notice("A malformed transcript entry was skipped."); }
       }
       return page(cursor, lines.join(""), reset, file.content.indexOf("\n", cursor.offset) >= 0, warning, entries);
     }

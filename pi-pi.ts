@@ -26,6 +26,8 @@ const MAX_CACHE = 200;
 /** No probe of a possibly unreachable host may hold a graph build longer. */
 const READ_TIMEOUT_MS = 10_000;
 const MAX_PATH = 4096;
+/** The bound pi-pi's own warning field carries, and all this module shows of it. */
+const WARNING_CAP = 200;
 /** A worker shows the processes it is running, not every one it ever ran. */
 const MAX_PROCESSES = 128;
 const COMMAND_CAP = 60;
@@ -122,7 +124,7 @@ const piWorkerFileSchema = z.object({
     .array(piProcessSchema.nullable().catch(null))
     .optional()
     .catch(() => [null]),
-  processWarning: bounded(200).optional().catch(undefined),
+  processWarning: bounded(WARNING_CAP).optional().catch(undefined),
 });
 
 // A process nobody is sampling any more still has to be visible: an id this
@@ -152,13 +154,15 @@ const piWorkerSchema = piWorkerFileSchema.transform((worker) => {
   );
   const dropped = raw.length - valid.length;
   // The cap is deliberate and says nothing; an entry this version could not
-  // read is a producer/consumer mismatch the user should hear about.
+  // read is a producer/consumer mismatch the user should hear about. The count
+  // leads, so that a producer warning long enough to fill the bound cannot
+  // push it out of what the node shows.
   const processWarning =
     dropped === 0
       ? worker.processWarning
-      : `${worker.processWarning ? `${worker.processWarning} ` : ""}${dropped} process ${dropped === 1 ? "entry" : "entries"} could not be read and are not shown.`.slice(
+      : `${dropped} process ${dropped === 1 ? "entry" : "entries"} could not be read and are not shown.${worker.processWarning ? ` ${worker.processWarning}` : ""}`.slice(
           0,
-          200,
+          WARNING_CAP,
         );
   return { ...worker, processes, processWarning };
 });
@@ -415,7 +419,7 @@ function workerMeta(worker: PiWorker, stale: boolean): Record<string, string> {
     ...(worker.result ? { result: worker.result.status } : {}),
     ...(active ? { "active processes": String(active) } : {}),
     ...(worker.processWarning
-      ? { "process warning": clip(worker.processWarning, LABEL_CAP) }
+      ? { "process warning": clip(worker.processWarning, WARNING_CAP) }
       : {}),
     ...(stale ? { state: "stale" } : {}),
   };

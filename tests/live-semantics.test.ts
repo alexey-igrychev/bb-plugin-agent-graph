@@ -88,6 +88,13 @@ test("shared, stale and truncated notices coexist and host file errors stay priv
   await assert.rejects(failure.read(processTarget),error=>error instanceof Error&&!error.message.includes("/storage/")&&/unavailable|read|captured/i.test(error.message));
 });
 
+test("large-entry clipping composes with shared, stale, malformed and recording-limit notices",async()=>{
+  const content="not-json\n"+JSON.stringify({seq:1,at:1,kind:"stdout",text:"x".repeat(65000)})+"\n";
+  const {read}=processReader({content,truncated:true,childCapture:"pipes"});
+  const page=await read({...processTarget,processId:"child"});
+  for(const notice of [/shared/i,/stale/i,/malformed/i,/large log entry/i,/recording limit/i])assert.match(page.warning!,notice);
+});
+
 test("shrinking a process log at the same path resets both retained offset and visible stream",async()=>{
   const h=processReader();const page=await h.read(processTarget);
   h.setContent(JSON.stringify({seq:1,at:1,kind:"stdout",text:"new"})+"\n");

@@ -1048,3 +1048,47 @@ test("a process without the identity or start the producer promises is dropped, 
   assert.match(parsed.processWarning!, /5 process entries/);
   assert.deepEqual(api.warnings, []);
 });
+
+test("the unreadable count reaches the node, and the producer's reason survives beside it", async () => {
+  const reason = "Commands are no longer logged: this session has written as much as it keeps.".padEnd(80, ".");
+  assert.equal(reason.length, 80);
+  const api = fakeApi(
+    stateJson({
+      workers: [
+        worker({
+          id: "task-1",
+          processWarning: reason,
+          processes: [proc({ id: "valid" }), { id: "unreadable" }],
+        }),
+      ],
+    }),
+  );
+  const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
+  const parsed = snapshot!.state.workers[0]!;
+  assert.match(parsed.processWarning!, /^1 process entry could not be read/);
+  assert.ok(parsed.processWarning!.includes(reason));
+  const visible = mergePiWorkers([threadNode()], THREAD, snapshot!)[1]!.meta["process warning"]!;
+  assert.match(visible, /1 process entry could not be read/);
+  assert.ok(visible.includes(reason), "the producer's own reason reaches the node");
+  assert.ok(visible.length <= 200);
+});
+
+test("a producer warning that fills the bound still leaves the count visible", async () => {
+  const reason = "Host sampling unavailable: ".padEnd(200, "x");
+  const api = fakeApi(
+    stateJson({
+      workers: [
+        worker({
+          id: "task-1",
+          processWarning: reason,
+          processes: [proc({ id: "valid" }), { id: "unreadable" }],
+        }),
+      ],
+    }),
+  );
+  const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
+  const visible = mergePiWorkers([threadNode()], THREAD, snapshot!)[1]!.meta["process warning"]!;
+  assert.match(visible, /1 process entry could not be read/);
+  assert.match(visible, /Host sampling unavailable/);
+  assert.ok(visible.length <= 200);
+});
