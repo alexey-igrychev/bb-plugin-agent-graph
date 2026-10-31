@@ -16,8 +16,11 @@ import {
   useRpc,
   type ExperimentalPluginFixedTabReference,
 } from "@get-bb/plugin-sdk/app";
-import type { Graph, rpcContract } from "./server";
+import type { Graph, GraphNode, rpcContract } from "./server";
 import { AgentGraphView } from "./graph";
+import { isActive } from "./layout";
+import { LivePanel } from "./live-panel";
+import { hasRunningPiWork, liveTargetFor } from "./live-stream";
 import {
   GRAPH_CHANGED,
   readStorage,
@@ -45,11 +48,20 @@ const THREAD_TAB: ExperimentalPluginFixedTabReference<BesideTarget> = {
   },
 };
 
+/** Read-only live output for any node that has something to follow. */
+function renderLive(node: GraphNode) {
+  const target = liveTargetFor(node);
+  if (target === null) return null;
+  // Keyed by node so a new selection never inherits the old panel's controls.
+  return <LivePanel key={node.id} {...target} active={isActive(node.status)} />;
+}
+
 /** The graph for one thread (or the overview), refetched on live changes. */
 function useGraph(threadId: string | null) {
   const rpc = useRpc<typeof rpcContract>();
   const [graph, setGraph] = useState<Graph | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fast, setFast] = useState(false);
   const graphRef = useRef<Graph | null>(null);
   const refetchRef = useRef<() => void>(() => {});
 
@@ -62,6 +74,7 @@ function useGraph(threadId: string | null) {
     graphRef.current = null;
     setGraph(null);
     setError(null);
+    setFast(false);
 
     const refetch = () => {
       // One request at a time; a change during a fetch schedules one more.
@@ -78,6 +91,7 @@ function useGraph(threadId: string | null) {
             graphRef.current = result;
             setGraph(result);
             setError(null);
+            setFast(hasRunningPiWork(result));
           },
           (cause: unknown) => {
             if (cancelled) return;
@@ -95,21 +109,28 @@ function useGraph(threadId: string | null) {
     refetchRef.current = refetch;
     refetch();
 
-    // A slow heartbeat keeps durations and missed events honest, but only
-    // while someone can see it.
-    const timer = setInterval(() => {
-      if (!document.hidden) refetch();
-    }, 15_000);
     const onVisible = () => {
       if (!document.hidden) refetch();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
-      clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [rpc, threadId]);
+
+  // A slow heartbeat keeps durations and missed events honest, but only
+  // while someone can see it. Running pi-pi workers change between the
+  // structural events the graph otherwise refetches on.
+  useEffect(() => {
+    const timer = setInterval(
+      () => {
+        if (!document.hidden) refetchRef.current();
+      },
+      fast ? 3_000 : 15_000,
+    );
+    return () => clearInterval(timer);
+  }, [fast]);
 
   useRealtime(GRAPH_CHANGED, (payload: unknown) => {
     if (document.hidden) return;
@@ -137,6 +158,7 @@ function OverviewPage() {
         error={error}
         onRetry={retry}
         onOpenThread={(threadId) => navigate.toThread(threadId)}
+        renderLive={renderLive}
         onOpenBeside={(threadId) => {
           writeStorage(BESIDE_KEY, threadId);
           panel.openFixedTab({
@@ -285,6 +307,7 @@ function ThreadGraphPanel({ threadId, params }: { threadId: string; params: unkn
         onOpenThread={(id) => {
           if (id !== threadId) navigate.toThread(id);
         }}
+        renderLive={renderLive}
       />
     </div>
   );
@@ -314,21 +337,24 @@ export default definePluginApp((app) => {
     icon: "Workflow",
     path: "graph",
     component: OverviewPage,
-    fixedTabs: [
-      {
-        ...THREAD_TAB,
-        title: "Thread",
-        icon: "MessageSquare",
-        layout: "flush",
-        component: BesideThreadTab,
-      },
-    ],
   });
-  app.slots.threadPanelAction({
+  app.slots.experimental_tab({
+    id: THREAD_TAB.id,
+    title: "Thread",
+    icon: "MessageSquare",
+    layout: "flush",
+    context: { kind: "nav-panel", panelId: THREAD_TAB.panelId },
+    availability: "fixed",
+    experimental_target: THREAD_TAB.experimental_target,
+    component: BesideThreadTab,
+  });
+  app.slots.experimental_tab({
     id: PANEL_ACTION_ID,
     title: "Agent graph",
     icon: "Workflow",
     layout: "flush",
+    context: { kind: "thread" },
+    availability: "action",
     component: ThreadGraphPanel,
     run: ({ openPanel }) => {
       openPanel({ title: "Agent graph" });

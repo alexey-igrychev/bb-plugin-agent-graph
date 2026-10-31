@@ -412,6 +412,7 @@ function DetailPanel({
   onClose,
   onOpenThread,
   onOpenBeside,
+  renderLive,
   overlay,
 }: {
   node: GraphNode;
@@ -419,6 +420,7 @@ function DetailPanel({
   onClose: () => void;
   onOpenThread: ((threadId: string) => void) | null;
   onOpenBeside: ((threadId: string) => void) | null;
+  renderLive: ((node: GraphNode) => ReactNode) | null;
   overlay: boolean;
 }) {
   const now = useNow(isActive(node.status));
@@ -498,6 +500,7 @@ function DetailPanel({
             </pre>
           </DetailBlock>
         ) : null}
+        {renderLive ? renderLive(node) : null}
       </div>
       {node.threadId && (onOpenThread || onOpenBeside) ? (
         <footer className="flex gap-2 border-t border-border p-3">
@@ -529,6 +532,7 @@ export function AgentGraphView({
   error,
   onOpenThread,
   onOpenBeside = null,
+  renderLive = null,
   compact = false,
   toolbarExtra = null,
   onRetry = null,
@@ -540,6 +544,8 @@ export function AgentGraphView({
   onOpenThread: ((threadId: string) => void) | null;
   /** Open the thread's chat next to the graph (the page's right panel). */
   onOpenBeside?: ((threadId: string) => void) | null;
+  /** Live output for the selected node, rendered at the end of its details. */
+  renderLive?: ((node: GraphNode) => ReactNode) | null;
   compact?: boolean;
   /** Extra controls rendered first in the toolbar row. */
   toolbarExtra?: ReactNode;
@@ -948,6 +954,7 @@ export function AgentGraphView({
           onClose={() => setSelectedId(null)}
           onOpenThread={onOpenThread}
           onOpenBeside={onOpenBeside}
+          renderLive={renderLive}
           overlay={compact || narrow}
         />
       ) : null}

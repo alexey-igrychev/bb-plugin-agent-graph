@@ -11,6 +11,8 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { normalizeTurns, type Row } from "./timeline";
 import { GRAPH_CHANGED, type GraphChangedPayload } from "./shared";
+import { createLiveReader, liveInputSchema, liveOutputSchema } from "./live";
+import { createPiReader, mergePiWorkers } from "./pi-pi";
 
 const nodeKindSchema = z.enum([
   "root",
@@ -63,6 +65,10 @@ export const rpcContract = defineRpcContract({
       threadId: z.string().nullable(),
     }),
     output: graphSchema,
+  },
+  live: {
+    input: liveInputSchema,
+    output: liveOutputSchema,
   },
 });
 
@@ -297,6 +303,7 @@ class GraphBuilder {
           input: clip(str(row.description), TEXT_CAP),
           output: clip(report, TEXT_CAP),
           meta: {
+            ...(str(row.callId) ? { itemId: str(row.callId)! } : {}),
             ...(str(row.subagentType) ? { type: str(row.subagentType)! } : {}),
             ...(row.background === true ? { mode: "background" } : {}),
             ...(childRef?.startsWith("thr_") ? { thread: childRef } : {}),
@@ -388,6 +395,7 @@ class GraphBuilder {
         output: clip(str(row.output), TEXT_CAP),
         meta: {
           kind: str(row.workKind) ?? "work",
+          ...(str(row.callId) ? { itemId: str(row.callId)! } : {}),
           ...(num(row.exitCode) !== null ? { exit: String(row.exitCode) } : {}),
         },
       });
@@ -459,6 +467,8 @@ class GraphBuilder {
 }
 
 export default async function plugin(bb: BbPluginApi) {
+  const piReader = createPiReader(bb);
+  const readLive = createLiveReader(bb.sdk, (threadId) => piReader.read(threadId));
   const settings = bb.settings.define({
     windowHours: {
       type: "select",
@@ -612,6 +622,9 @@ export default async function plugin(bb: BbPluginApi) {
     const rows = await mapLimited(ordered, 4, (thread) =>
       timelineRows(thread, turns),
     );
+    const snapshots = await mapLimited(ordered, 4, (thread) =>
+      thread.providerId === "pi" ? piReader.read(thread.id) : Promise.resolve(null),
+    );
     const orderedIds = new Set(ordered.map((thread) => thread.id));
     ordered.forEach((thread, index) => {
       const parentId =
@@ -626,6 +639,14 @@ export default async function plugin(bb: BbPluginApi) {
         RUNNING_THREAD_STATUSES.has(thread.status),
         turns,
       );
+      const snapshot = snapshots[index];
+      if (snapshot) {
+        builder.nodes = mergePiWorkers(builder.nodes, thread.id, snapshot);
+        if (builder.nodes.length > MAX_NODES) {
+          builder.nodes.length = MAX_NODES;
+          builder.truncated = true;
+        }
+      }
     });
   }
 
@@ -780,6 +801,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.rpc.register(rpcContract, {
     graph: ({ threadId }) => graphFor(threadId),
+    live: (input) => readLive(input),
   });
 
   // Live updates: coalesce thread changes and tell open graphs to refetch.

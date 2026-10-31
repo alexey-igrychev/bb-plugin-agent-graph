@@ -2,6 +2,77 @@
 
 See what every [bb](https://getbb.app) agent is doing, as a live map.
 
+## Experimental fork: live output and pi-pi
+
+This public fork of [Nathan Colgate's Agent Graph](https://github.com/nathancolgate/bb-plugin-agent-graph)
+adds read-only live output and pi-pi worker activity. It requires **bb 0.47.1 or newer**.
+The upstream plugin and marketplace listing below are unchanged; this fork is
+not installed automatically, and no upstream PR has been opened.
+
+Select a thread, tool call or subagent to open **Live output** in its details.
+Pause/resume reading or toggle **Follow** to control auto-scroll. The panel
+reads BB's normalized events incrementally; it shows command output, messages
+and tool results as the provider supplies them. Some providers only send a
+result when a tool finishes: this is not an interactive terminal or a promise
+of character-by-character stdout. Nodes without a tool/worker target show the
+whole thread's event stream.
+
+Only the selected log is followed. Active targets poll every second; finished
+targets refresh every ten seconds after catch-up. Polling stops while paused,
+hidden or unmounted. Failed reads retain the last visible text. The panel keeps the
+latest 200,000 characters, with an explicit notice when older output was
+dropped; unusually large entries are also labelled as truncated. Provider-side
+retention limits still apply.
+
+### pi-pi workers
+
+Both the overview and focused graph read `pi-pi/state.json` through BB's
+host-aware SDK. Worker status, current step, model, tool count and result enrich
+the launch node instead of adding a duplicate. Worker activity keeps the
+thread and its ancestors active while the main agent waits. A stopped heartbeat
+marks unfinished workers interrupted instead of pretending they completed.
+
+Existing pi-pi versions support this graph activity and an explicitly labelled
+latest-output preview. **Full worker transcripts require the accompanying pi-pi
+change** that exports optional `workers[].transcriptFile` in that state file.
+The graph reads that server-selected path on the same host; clients send only
+thread and worker IDs. It never guesses a transcript directory. A resumed run
+with a different file resets the panel to that run; previous runs are not joined
+automatically. Transcripts contain recorded messages and tool results, not
+necessarily token-level streaming output.
+
+The current SDK reads whole files, so only the selected worker's transcript is
+read, with a 21 MiB input limit (pi-pi itself caps recordings at 20 MiB).
+Backlog pages share one immutable file snapshot instead of re-reading the
+whole file per page; the server caches at most two snapshots. Three or more
+concurrent worker panes can evict each other's snapshots and require extra
+whole-file reads. At EOF the
+snapshot refreshes at most once a second for active workers or ten seconds for
+finished workers. Capped recordings remain readable and show a truncation
+warning. Native delegations with their own BB thread follow that child thread.
+Provider buffer resets are labelled in the log. Deduplication keeps only the
+latest 64 snapshots, independently of active descendants. More than 1,000
+simultaneously tracked items can drop old descendant tracking, with an explicit
+warning.
+
+No worker commands, process attachment, terminal input, global configuration
+changes or automatic installation are included.
+
+### Test this checkout
+
+```sh
+npm ci --ignore-scripts
+npm test
+npm run typecheck
+npm run build
+```
+
+To install for manual testing **when ready**, run `bb plugin install` with the
+local checkout path or a published ref of this fork. Installing replaces the
+existing Agent Graph plugin; it is deliberately a separate action. The stock
+pi-pi installation remains unchanged until its transcript-metadata change is
+installed separately.
+
 Agent Graph draws your projects, threads, turns, tool calls, subagents and
 workflow agents as a graph that updates while agents work. Instead of scrolling
 through logs to find out what a subagent is up to, you glance at the map. Click

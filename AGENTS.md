@@ -4,7 +4,16 @@ A bb plugin that draws a live node graph of bb agents: project → thread →
 turn → tool call / subagent / workflow agent, plus child threads. See
 README.md for features and the code map.
 
-## Status (as of 2026-09-23)
+## Fork notes
+
+This checkout is `alexey-igrychev/bb-plugin-agent-graph`, an experimental public
+fork adding live output and pi-pi worker support. `upstream` is Nathan Colgate's
+repository. Preserve its MIT license and copyright. The history below describes
+the original project, not this user's local installation. Use the fork owner's
+Git identity, not the original author's. No upstream PR or installation is part
+of the current testing task. Ask before pushing, as in the release procedure.
+
+## Upstream status (as of 2026-09-23)
 
 - v0.1.0 is released: tag `v0.1.0` on
   https://github.com/nathancolgate/bb-plugin-agent-graph (public, MIT).
@@ -43,8 +52,8 @@ drive that browser at a time, because it is a shared session.
 3. Ask the user before pushing. Then:
    `git tag -a vX.Y.Z -m "Release vX.Y.Z" && git push origin main vX.Y.Z`
 
-Git author for this repo is "Nathan Colgate" with the GitHub no-reply
-address (already set in `.git/config`). Don't use the global git identity.
+The upstream checkout uses Nathan Colgate's Git identity. Do not copy that
+identity into this fork; verify the fork owner's author before committing.
 
 ## Things worth knowing
 
