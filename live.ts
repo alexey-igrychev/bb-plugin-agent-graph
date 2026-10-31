@@ -128,13 +128,13 @@ function providerEntry(event: Record<string, unknown>, text: string): LiveEntry 
   const itemId = string(data.itemId) || string(item.id) || String(event.seq);
   const at = timestamp(event.createdAt);
   const delta = type.endsWith("/delta") || type.endsWith("/outputDelta") || type.endsWith("/textDelta") || type.endsWith("/summaryTextDelta");
-  const thinking = type.includes("reasoning");
+  const thinking = type.includes("reasoning") || item.type === "reasoning";
   const command = string(item.command) || string(record(item.arguments).command);
   const kind: LiveKind = item.type === "userMessage" ? "user" : thinking ? "thinking" : type.includes("agentMessage") || item.type === "agentMessage" ? "assistant" : command || item.type === "commandExecution" || type.includes("commandExecution") ? "command" : "tool";
   const completed = type === "item/completed" || type === "item/delegation/completed" || type === "item/backgroundTask/completed";
   if (!text && !completed) return null;
-  const body = item.type === "userMessage" ? (text ? contentText(item.content).slice(-TEXT_LIMIT) : "") : type === "item/started" ? "" : delta ? (data.reset === true ? `[output reset]\n${string(data.delta)}` : string(data.delta)).slice(-TEXT_LIMIT) : text;
-  return {id:`event:${itemId}:${thinking ? "thinking" : "item"}`,at,kind,text:body,tool:string(item.tool) || undefined,command:command.slice(0,4096) || undefined,status:string(item.status) || (completed ? "done" : "running"),exitCode:typeof item.exitCode === "number" ? item.exitCode : undefined,append:(delta && data.reset !== true) || (completed && !text)};
+  const body = item.type === "userMessage" ? (text ? contentText(item.content).slice(-TEXT_LIMIT) : "") : type === "item/started" ? (command ? "" : text.trim()) : delta ? (data.reset === true ? `[output reset]\n${string(data.delta)}` : string(data.delta)).slice(-TEXT_LIMIT) : text;
+  return {id:`event:${itemId}:${thinking ? "thinking" : "item"}`,at,kind,text:body,tool:string(item.tool) || undefined,command:command.slice(0,4096) || undefined,status:string(item.status) || (completed ? "done" : "running"),exitCode:typeof item.exitCode === "number" ? item.exitCode : undefined,append:(delta && data.reset !== true) || completed || type.endsWith("/progress")};
 }
 
 function eventText(event: Record<string, unknown>, streamed: Set<string>, printed: Record<string, string>): string {
@@ -216,7 +216,9 @@ export function createLiveReader(api: LiveApi, readPi: (threadId: string) => Pro
       // multi-MB file once for every page multiplies remote I/O by page count.
       if (file.content.indexOf("\n", offset) >= 0 || Date.now() - cached.at < cached.ttl) return file;
     }
-    const value = api.files.read({ hostId, path, signal: AbortSignal.timeout(10_000) }).then((file) => {
+    const value = Promise.resolve().then(() => api.files.read({ hostId, path, signal: AbortSignal.timeout(10_000) })).catch(() => {
+      throw new Error("Captured log is unavailable on its host; the previous output is retained.");
+    }).then((file) => {
       if (file.contentEncoding !== "utf8") throw new Error("Worker transcript is not UTF-8 text");
       if ((file.sizeBytes ?? Buffer.byteLength(file.content)) > TRANSCRIPT_LIMIT) throw new Error("Worker transcript exceeds the supported size limit");
       return file;
@@ -252,7 +254,12 @@ export function createLiveReader(api: LiveApi, readPi: (threadId: string) => Pro
         const path = root?.logFile ?? process.logFile;
         cursor.source = "process";
         const shared = process.outputCapture === "shared" || process.rootId !== process.id;
-        warning = shared ? "Shared root-command output: separate per-child stdout/stderr is not available." : (process.warning ?? null);
+        const notice = (text: string | undefined) => {
+          if (text && !warning?.includes(text)) warning = warning ? `${warning} ${text}` : text;
+        };
+        if (shared) notice("Shared root-command output: separate per-child stdout/stderr is not available.");
+        notice(process.warning);
+        if (root?.warning !== process.warning) notice(root?.warning);
         if (!path || process.outputCapture === "unavailable") {
           const text = bounded(process.outputTail ?? "");
           return page(cursor, text, true, false, warning ?? "No captured output; streams may be redirected, inherited or unavailable.", [{id:process.id,at:process.startedAt,kind:"command",text,command:process.command,status:process.status,exitCode:process.exitCode}]);
@@ -280,12 +287,15 @@ export function createLiveReader(api: LiveApi, readPi: (threadId: string) => Pro
             const kind: LiveKind = row.kind === "start" || row.kind === "exit" ? "command" : row.kind as LiveKind;
             const id = row.kind === "start" || row.kind === "exit" ? `${process.rootId}:command` : `${process.rootId}:${row.seq ?? cursor.offset}`;
             const exitCode = typeof row.exitCode === "number" || row.exitCode === null ? row.exitCode : undefined;
-            entries.push({id,at,kind,text,tool:process.toolName,command:kind === "command" ? (root?.command ?? process.command) : undefined,status:string(row.status) || (row.kind === "start" ? "running" : undefined),exitCode,append:row.kind === "exit"});
-            const flat = row.kind === "exit" ? `\n[exit ${exitCode ?? (string(row.signal) || "unknown")}]\n` : text;
+            const command = root?.command ?? process.command;
+            const body = row.kind === "start" && text === command ? "" : text;
+            const status = string(row.status) || (row.kind === "start" ? "running" : row.kind === "exit" ? ((typeof exitCode === "number" && exitCode !== 0) || row.signal ? "failed" : "exited") : undefined);
+            entries.push({id,at,kind,text:body,tool:process.toolName,command:kind === "command" ? command : undefined,status,exitCode,append:row.kind === "exit"});
+            const flat = row.kind === "exit" ? `\n[exit ${exitCode ?? (string(row.signal) || "unknown")}]\n` : row.kind === "start" ? `${text || command}\n` : text;
             lines.push(flat); size += flat.length;
-          } catch { warning = "A malformed process log entry was skipped."; }
+          } catch { notice("A malformed process log entry was skipped."); }
         }
-        if (process.logTruncated || root?.logTruncated) warning = "Captured process output reached its recording limit; later output was not retained.";
+        if (process.logTruncated || root?.logTruncated) notice("Captured process output reached its recording limit; later output was not retained.");
         return page(cursor, lines.join(""), reset, file.content.indexOf("\n", cursor.offset) >= 0, warning, entries);
       }
       if (!worker.transcriptFile) {

@@ -55,7 +55,8 @@ const metric = z.number().min(0).optional().catch(undefined);
 // A child process a worker started. Its id is pi-pi's own, independent of the
 // pid the OS may hand to another process once this one exits. A field this
 // version cannot trust is dropped where the node can do without it; the rest
-// (id, pid, status) drop the whole entry rather than invent a process.
+// (id, rootId, pid, status, startedAt) drop the whole entry rather than invent
+// a process the producer never described.
 const piProcessSchema = z.object({
   id: z.string().min(1).max(120),
   rootId: z.string().min(1).max(120),
@@ -82,7 +83,7 @@ const piProcessSchema = z.object({
   warning: bounded(200).optional().catch(undefined),
 });
 
-const piWorkerSchema = z.object({
+const piWorkerFileSchema = z.object({
   // Never clipped: a shortened id would collide with another worker's.
   id: z.string().min(1).max(120),
   type: bounded(80),
@@ -114,15 +115,51 @@ const piWorkerSchema = z.object({
   transcriptFile: z.string().min(1).max(MAX_PATH).optional().catch(undefined),
   // Absent from files an older pi-pi wrote, and from a worker that started no
   // process; a shape this version does not know costs the processes, not the
-  // worker.
+  // worker. Entries are kept as nulls here so the worker's own transform can
+  // count what it lost.
   processes: z
     .array(piProcessSchema.nullable().catch(null))
-    .transform((list) =>
-      list.filter((entry) => entry !== null).slice(0, MAX_PROCESSES),
-    )
     .optional()
     .catch(undefined),
   processWarning: bounded(200).optional().catch(undefined),
+});
+
+// A process nobody is sampling any more still has to be visible: an id this
+// version cannot read is a process pi-pi is running that the graph would
+// otherwise show as nothing at all.
+const ACTIVE_PROCESS: ReadonlySet<z.infer<typeof piProcessStatusSchema>> = new Set([
+  "running",
+  "unknown",
+]);
+
+/**
+ * The processes a worker shows: everything still going, then the most recently
+ * started of what has finished. The cap is a drawing limit, so it must never
+ * be what hides a live process — a worker that keeps its whole history would
+ * otherwise bury the one process that is still running.
+ */
+const piWorkerSchema = piWorkerFileSchema.transform((worker) => {
+  const raw = worker.processes;
+  if (raw === undefined) return { ...worker, processes: undefined };
+  const valid = raw.filter((entry) => entry !== null);
+  const finished = valid
+    .filter((entry) => !ACTIVE_PROCESS.has(entry.status))
+    .sort((a, b) => b.startedAt - a.startedAt);
+  const processes = [...valid.filter((entry) => ACTIVE_PROCESS.has(entry.status)), ...finished].slice(
+    0,
+    MAX_PROCESSES,
+  );
+  const dropped = raw.length - valid.length;
+  // The cap is deliberate and says nothing; an entry this version could not
+  // read is a producer/consumer mismatch the user should hear about.
+  const processWarning =
+    dropped === 0
+      ? worker.processWarning
+      : `${worker.processWarning ? `${worker.processWarning} ` : ""}${dropped} process ${dropped === 1 ? "entry" : "entries"} could not be read and are not shown.`.slice(
+          0,
+          200,
+        );
+  return { ...worker, processes, processWarning };
 });
 
 const piStateSchema = z.object({

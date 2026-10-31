@@ -243,3 +243,17 @@ test("the same process id with a new log file restarts that log instead of resum
   assert.equal(again.entries?.length,3);
   assert.doesNotMatch(again.text,/first attempt/);
 });
+
+test("a piped descendant of a truncated root is told both that the pipe is shared and that output was lost",async()=>{
+  const h=setup();
+  const root=h.source.state.workers[0]!.processes![0]!;
+  root.logTruncated=true;
+  // The child captures through the root's pipe: its own flags say nothing is
+  // shared and nothing was lost, and neither claim is true of what it shows.
+  h.source.state.workers[0]!.processes!.push({...root,id:"child-d",rootId:"process-a",parentId:"process-a",pid:129,outputCapture:"pipes",logTruncated:false});
+  h.setLines([{seq:1,at:1,kind:"stdout",text:"all that was kept"}]);
+  const page=await h.read({...target,processId:"child-d"});
+  assert.match(page.warning!,/shared/i);
+  assert.match(page.warning!,/recording limit/i);
+  assert.match(page.text,/all that was kept/);
+});

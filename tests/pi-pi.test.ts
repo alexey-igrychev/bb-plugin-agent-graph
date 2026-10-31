@@ -887,3 +887,156 @@ test("does nothing when there are no workers", () => {
   assert.equal(merged.length, 2);
   assert.equal(merged[1]!.status, "done");
 });
+
+test("the process cap keeps what is still running, not merely what started first", async () => {
+  const history = Array.from({ length: 129 }, (_, index) =>
+    proc({
+      id: `old-${index}`,
+      status: "exited",
+      exitCode: 0,
+      startedAt: HEARTBEAT - 600_000 + index,
+      endedAt: HEARTBEAT - 500_000 + index,
+    }),
+  );
+  const api = fakeApi(
+    stateJson({
+      workers: [
+        worker({
+          id: "task-1",
+          status: "completed",
+          settledAt: HEARTBEAT,
+          processes: [...history, proc({ id: "live-1", status: "running" })],
+        }),
+      ],
+    }),
+  );
+  const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
+  const kept = snapshot!.state.workers[0]!.processes!;
+  assert.equal(kept.length, 128);
+  assert.equal(kept[0]!.id, "live-1");
+  // The cap drops the oldest finished processes, never a live one.
+  assert.equal(kept[1]!.id, "old-128");
+  assert.equal(kept.at(-1)!.id, "old-2");
+  assert.equal(
+    kept.some((entry) => entry.id === "old-0" || entry.id === "old-1"),
+    false,
+  );
+  assert.equal(snapshot!.state.workers[0]!.processWarning, undefined);
+
+  const merged = mergePiWorkers([threadNode("idle")], THREAD, snapshot!);
+  assert.equal(merged[0]!.status, "running");
+  assert.equal(merged[1]!.status, "done");
+  assert.equal(merged[1]!.meta["active processes"], "1");
+  assert.ok(merged.some((entry) => entry.meta.piProcessId === "live-1" && entry.status === "running"));
+});
+
+test("a process whose parent the cap dropped hangs off its worker", async () => {
+  const history = Array.from({ length: 128 }, (_, index) =>
+    proc({ id: `old-${index}`, status: "exited", exitCode: 0, startedAt: HEARTBEAT - 600_000 + index }),
+  );
+  const api = fakeApi(
+    stateJson({
+      workers: [
+        worker({
+          id: "task-1",
+          processes: [...history, proc({ id: "child", rootId: "old-0", parentId: "old-0" })],
+        }),
+      ],
+    }),
+  );
+  const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
+  const merged = mergePiWorkers([threadNode()], THREAD, snapshot!);
+  const child = merged.find((entry) => entry.meta.piProcessId === "child")!;
+  assert.equal(child.parentId, `${THREAD}:pi:task-1`);
+  assert.equal(merged.filter((entry) => entry.parentId === null).length, 0);
+});
+
+test("a process entry it cannot read is said to be missing, in the worker's own warning", async () => {
+  const api = fakeApi(
+    stateJson({
+      workers: [
+        worker({
+          id: "task-1",
+          processWarning: "sampling is unavailable on this host",
+          processes: [proc({ id: "ok" }), proc({ id: "bad", pid: -1 }), { not: "a process" }],
+        }),
+      ],
+    }),
+  );
+  const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
+  const parsed = snapshot!.state.workers[0]!;
+  assert.deepEqual(parsed.processes!.map((entry) => entry.id), ["ok"]);
+  assert.match(parsed.processWarning!, /sampling is unavailable on this host/);
+  assert.match(parsed.processWarning!, /2 process entries/);
+  assert.ok(parsed.processWarning!.length <= 200);
+  const merged = mergePiWorkers([threadNode()], THREAD, snapshot!);
+  assert.match(merged[1]!.meta["process warning"]!, /2 process entries/);
+});
+
+test("the cap alone is not reported as a failure to read", async () => {
+  const many = Array.from({ length: 200 }, (_, index) => proc({ id: `p${index}` }));
+  const api = fakeApi(stateJson({ workers: [worker({ id: "task-1", processes: many })] }));
+  const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
+  assert.equal(snapshot!.state.workers[0]!.processes!.length, 128);
+  assert.equal(snapshot!.state.workers[0]!.processWarning, undefined);
+});
+
+test("the producer's own process contract parses whole, and loses no field", async () => {
+  const full = {
+    id: "proc-1",
+    rootId: "proc-1",
+    parentId: undefined,
+    toolCallId: "call-1",
+    toolName: "bash",
+    command: "npm run build",
+    pid: 4321,
+    ppid: 4320,
+    startedAt: HEARTBEAT - 30_000,
+    endedAt: HEARTBEAT - 1_000,
+    status: "exited",
+    exitCode: 0,
+    signal: null,
+    cpuPercent: 12.5,
+    rssBytes: 48 * 1024 * 1024,
+    sampledAt: HEARTBEAT - 2_000,
+    outputTail: "built",
+    logFile: "/storage/thr_demo/pi-pi/processes/proc-1.jsonl",
+    logTruncated: false,
+    outputCapture: "pipes",
+    warning: "sampled once",
+  };
+  const api = fakeApi(stateJson({ workers: [worker({ id: "task-1", processes: [full] })] }));
+  const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
+  const parsed = snapshot!.state.workers[0]!.processes![0]!;
+  assert.deepEqual({ ...parsed, parentId: undefined }, { ...full, parentId: undefined });
+  assert.equal(snapshot!.state.workers[0]!.processWarning, undefined);
+});
+
+test("a process without the identity or start the producer promises is dropped, and counted", async () => {
+  const incomplete = (overrides: Record<string, unknown>) => {
+    const entry = proc({ id: "p" }) as Record<string, unknown>;
+    return { ...entry, ...overrides };
+  };
+  const api = fakeApi(
+    stateJson({
+      workers: [
+        worker({
+          id: "task-1",
+          processes: [
+            incomplete({ id: undefined }),
+            incomplete({ rootId: undefined }),
+            incomplete({ pid: undefined }),
+            incomplete({ status: undefined }),
+            incomplete({ startedAt: undefined }),
+            proc({ id: "whole" }),
+          ],
+        }),
+      ],
+    }),
+  );
+  const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
+  const parsed = snapshot!.state.workers[0]!;
+  assert.deepEqual(parsed.processes!.map((entry) => entry.id), ["whole"]);
+  assert.match(parsed.processWarning!, /5 process entries/);
+  assert.deepEqual(api.warnings, []);
+});
