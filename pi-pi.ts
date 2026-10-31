@@ -116,11 +116,12 @@ const piWorkerFileSchema = z.object({
   // Absent from files an older pi-pi wrote, and from a worker that started no
   // process; a shape this version does not know costs the processes, not the
   // worker. Entries are kept as nulls here so the worker's own transform can
-  // count what it lost.
+  // count what it lost — a whole list in an unknown shape counts as one such
+  // loss, rather than passing for a worker that started nothing.
   processes: z
     .array(piProcessSchema.nullable().catch(null))
     .optional()
-    .catch(undefined),
+    .catch(() => [null]),
   processWarning: bounded(200).optional().catch(undefined),
 });
 

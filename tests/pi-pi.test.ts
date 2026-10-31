@@ -527,13 +527,21 @@ test("a worker from an older pi-pi has no processes and adds no process nodes", 
   assert.equal(merged[1]!.meta["active processes"], undefined);
 });
 
-test("an unknown processes shape drops the processes, not the worker", async () => {
+test("an unknown processes shape drops the processes, and says one record was unreadable", async () => {
   const api = fakeApi(
     stateJson({ workers: [worker({ id: "task-1", processes: "not a list" })] }),
   );
   const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
   assert.deepEqual(snapshot!.state.workers.map((entry) => entry.id), ["task-1"]);
+  assert.deepEqual(snapshot!.state.workers[0]!.processes, []);
+  assert.match(snapshot!.state.workers[0]!.processWarning!, /1 process entry could not be read/);
+});
+
+test("a worker that never mentions processes stays silent about them", async () => {
+  const api = fakeApi(stateJson({ workers: [worker({ id: "task-1" })] }));
+  const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
   assert.equal(snapshot!.state.workers[0]!.processes, undefined);
+  assert.equal(snapshot!.state.workers[0]!.processWarning, undefined);
 });
 
 test("hangs a worker's processes off it, roots first, children under their parent", () => {

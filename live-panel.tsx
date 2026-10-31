@@ -302,6 +302,8 @@ export function LivePanel({
             follow,
             scrollTop: event.currentTarget.scrollTop,
             autoScrollTop: autoScrollTop.current,
+            scrollHeight: event.currentTarget.scrollHeight,
+            clientHeight: event.currentTarget.clientHeight,
           });
           if (released) setFollow(false);
         }}

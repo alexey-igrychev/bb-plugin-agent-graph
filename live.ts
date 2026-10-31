@@ -133,7 +133,8 @@ function providerEntry(event: Record<string, unknown>, text: string): LiveEntry 
   const kind: LiveKind = item.type === "userMessage" ? "user" : thinking ? "thinking" : type.includes("agentMessage") || item.type === "agentMessage" ? "assistant" : command || item.type === "commandExecution" || type.includes("commandExecution") ? "command" : "tool";
   const completed = type === "item/completed" || type === "item/delegation/completed" || type === "item/backgroundTask/completed";
   if (!text && !completed) return null;
-  const body = item.type === "userMessage" ? (text ? contentText(item.content).slice(-TEXT_LIMIT) : "") : type === "item/started" ? (command ? "" : text.trim()) : delta ? (data.reset === true ? `[output reset]\n${string(data.delta)}` : string(data.delta)).slice(-TEXT_LIMIT) : text;
+  const label = item.type === "delegation" || item.type === "backgroundTask" ? string(item.label) || string(item.description) : "";
+  const body = item.type === "userMessage" ? (text ? contentText(item.content).slice(-TEXT_LIMIT) : "") : type === "item/started" ? label.slice(0, TEXT_LIMIT) : delta ? (data.reset === true ? `[output reset]\n${string(data.delta)}` : string(data.delta)).slice(-TEXT_LIMIT) : text;
   return {id:`event:${itemId}:${thinking ? "thinking" : "item"}`,at,kind,text:body,tool:string(item.tool) || undefined,command:command.slice(0,4096) || undefined,status:string(item.status) || (completed ? "done" : "running"),exitCode:typeof item.exitCode === "number" ? item.exitCode : undefined,append:(delta && data.reset !== true) || completed || type.endsWith("/progress")};
 }
 

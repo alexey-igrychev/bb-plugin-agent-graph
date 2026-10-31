@@ -23,6 +23,19 @@ test("native delegation label, progress and final result survive reader-to-panel
   assert.equal(state.entries[0]!.status,"completed");
 });
 
+test("assistant and ordinary tool starts do not leak legacy bracket headers into semantic entries",async()=>{
+  const read=eventsReader([
+    {seq:1,createdAt:1,type:"item/started",data:{item:{id:"reply",type:"agentMessage"}}},
+    {seq:2,createdAt:2,type:"item/agentMessage/delta",data:{itemId:"reply",delta:"Hello"}},
+    {seq:3,createdAt:3,type:"item/completed",data:{item:{id:"reply",type:"agentMessage",text:"Hello",status:"completed"}}},
+    {seq:4,createdAt:4,type:"item/started",data:{item:{id:"read",type:"toolCall",tool:"read"}}},
+    {seq:5,createdAt:5,type:"item/completed",data:{item:{id:"read",type:"toolCall",tool:"read",result:"file contents",status:"completed"}}},
+  ]);
+  const state=applyLivePage(emptyLiveState,await read(target));
+  assert.equal(state.entries.find(e=>e.kind==="assistant")!.text,"Hello");
+  assert.ok(!state.entries.find(e=>e.tool==="read")!.text.includes("[toolCall]"));
+});
+
 test("failed completion appends its error to streamed diagnostics instead of deleting them",async()=>{
   const read=eventsReader([
     {seq:1,createdAt:1,type:"item/started",data:{item:{id:"patch",type:"fileChange",changes:[]}}},

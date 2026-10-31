@@ -110,15 +110,21 @@ const BOTTOM_SLACK_PX = 24;
 
 /**
  * Whether a scroll event means the reader wants to stop following the tail.
- * Compared against the position the panel itself last scrolled to, not against
- * the bottom: new output grows the view below that position, so a page landing
- * mid-scroll can never be mistaken for the reader scrolling up, and the first
- * genuine scroll up is never swallowed.
+ * Two things have to hold: the view moved above the position the panel itself
+ * last pinned (new output grows it below that, and a filter, a search or the
+ * wrap toggle shrinks it, so the browser clamps it there), and it is no longer
+ * at the bottom. A clamp lands at the bottom; only the reader leaves it.
  */
 export function releasesFollow(input: {
   follow: boolean;
   scrollTop: number;
   autoScrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
 }): boolean {
-  return input.follow && input.scrollTop < input.autoScrollTop - BOTTOM_SLACK_PX;
+  return (
+    input.follow &&
+    input.scrollTop < input.autoScrollTop - BOTTOM_SLACK_PX &&
+    input.scrollHeight - input.scrollTop - input.clientHeight > BOTTOM_SLACK_PX
+  );
 }

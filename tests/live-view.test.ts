@@ -122,16 +122,39 @@ test("copied text carries what is on screen, with time, role and outcome", () =>
 });
 
 test("following is released by the reader's scroll, not by the panel's own", () => {
-  // The panel last pinned the view at 900.
-  const pinned = { follow: true, autoScrollTop: 900 };
+  // The panel last pinned the view at 900, in a 1600px view 700px tall.
+  const pinned = { follow: true, autoScrollTop: 900, scrollHeight: 1600, clientHeight: 700 };
   assert.equal(releasesFollow({ ...pinned, scrollTop: 400 }), true);
   assert.equal(releasesFollow({ ...pinned, scrollTop: 880 }), false, "24px of slack");
   assert.equal(releasesFollow({ ...pinned, scrollTop: 900 }), false);
   // New output arrived and the view grew below the pin: not the reader moving.
-  assert.equal(releasesFollow({ ...pinned, scrollTop: 1500 }), false);
+  assert.equal(
+    releasesFollow({ ...pinned, scrollTop: 1500, scrollHeight: 2400 }),
+    false,
+  );
   assert.equal(releasesFollow({ ...pinned, follow: false, scrollTop: 0 }), false);
   // Nothing pinned yet, so nothing can read as scrolling away.
-  assert.equal(releasesFollow({ follow: true, autoScrollTop: 0, scrollTop: 0 }), false);
+  assert.equal(
+    releasesFollow({ follow: true, autoScrollTop: 0, scrollTop: 0, scrollHeight: 700, clientHeight: 700 }),
+    false,
+  );
+  // A filter, a search or a wrap toggle shrinks the content, and the browser
+  // clamps scrollTop below the old pin. Still at the bottom, so still following.
+  assert.equal(
+    releasesFollow({ ...pinned, scrollTop: 200, scrollHeight: 900, clientHeight: 700 }),
+    false,
+    "a clamp to the bottom is not the reader scrolling up",
+  );
+  // The clamp can land a few pixels short of the bottom; that is still the bottom.
+  assert.equal(
+    releasesFollow({ ...pinned, scrollTop: 190, scrollHeight: 900, clientHeight: 700 }),
+    false,
+  );
+  // Content shorter than the view clamps scrollTop to 0 and is always at the bottom.
+  assert.equal(
+    releasesFollow({ ...pinned, scrollTop: 0, scrollHeight: 300, clientHeight: 700 }),
+    false,
+  );
 });
 
 test("the caption keeps the node's identity beside the output", () => {
