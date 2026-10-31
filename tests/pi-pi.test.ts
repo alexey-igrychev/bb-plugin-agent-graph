@@ -4,6 +4,7 @@ import {
   createPiReader,
   mergePiWorkers,
   type PiReaderApi,
+  type PiProcess,
   type PiSnapshot,
   type PiWorker,
 } from "../pi-pi.ts";
@@ -52,7 +53,10 @@ function fakeApi(file: string | null): FakeApi {
   return api;
 }
 
-function worker(overrides: Partial<PiWorker> & { id: string }): Record<string, unknown> {
+// `processes` stays loose: these fixtures feed the reader shapes it must survive.
+function worker(
+  overrides: Partial<Omit<PiWorker, "processes">> & { id: string; processes?: unknown },
+): Record<string, unknown> {
   return {
     type: "task",
     description: "Do the thing",
@@ -66,6 +70,22 @@ function worker(overrides: Partial<PiWorker> & { id: string }): Record<string, u
     toolUses: 7,
     tokens: 1234,
     outputTail: "thinking about it",
+    ...overrides,
+  };
+}
+
+function proc(overrides: Partial<PiProcess> & { id: string }): Record<string, unknown> {
+  return {
+    rootId: overrides.id,
+    toolCallId: "call-1",
+    toolName: "bash",
+    command: "npm test",
+    pid: 4321,
+    ppid: 4320,
+    startedAt: HEARTBEAT - 30_000,
+    status: "running",
+    outputCapture: "pipes",
+    outputTail: "running tests",
     ...overrides,
   };
 }
@@ -498,6 +518,367 @@ test("puts remote timestamps on the reader's clock", () => {
   );
   assert.equal(merged[1]!.startedAt, HEARTBEAT + 10_000);
   assert.equal(merged[1]!.completedAt, HEARTBEAT + 11_000);
+});
+
+test("a worker from an older pi-pi has no processes and adds no process nodes", () => {
+  const merged = mergePiWorkers([threadNode()], THREAD, snapshotOf([worker({ id: "task-1" })]));
+  assert.equal(merged.length, 2);
+  assert.equal(merged[1]!.meta.piProcessId, undefined);
+  assert.equal(merged[1]!.meta["active processes"], undefined);
+});
+
+test("an unknown processes shape drops the processes, not the worker", async () => {
+  const api = fakeApi(
+    stateJson({ workers: [worker({ id: "task-1", processes: "not a list" })] }),
+  );
+  const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
+  assert.deepEqual(snapshot!.state.workers.map((entry) => entry.id), ["task-1"]);
+  assert.equal(snapshot!.state.workers[0]!.processes, undefined);
+});
+
+test("hangs a worker's processes off it, roots first, children under their parent", () => {
+  const merged = mergePiWorkers(
+    [threadNode(), node({ id: "n1" })],
+    THREAD,
+    snapshotOf([
+      worker({
+        id: "task-1",
+        processes: [
+          proc({ id: "p3", rootId: "p1", parentId: "p2", command: "grandchild" }),
+          proc({ id: "p2", rootId: "p1", parentId: "p1", command: "child" }),
+          proc({ id: "p1", command: "npm test" }),
+          proc({ id: "q1", command: "tail -f log" }),
+        ],
+      }),
+    ]),
+  );
+  const ids = merged.map((entry) => entry.id);
+  assert.deepEqual(ids.slice(2), [
+    `${THREAD}:pi:task-1:process:p1`,
+    `${THREAD}:pi:task-1:process:q1`,
+    `${THREAD}:pi:task-1:process:p2`,
+    `${THREAD}:pi:task-1:process:p3`,
+  ]);
+  const byId = new Map(merged.map((entry) => [entry.id, entry]));
+  assert.equal(byId.get(`${THREAD}:pi:task-1:process:p1`)!.parentId, "n1");
+  assert.equal(byId.get(`${THREAD}:pi:task-1:process:q1`)!.parentId, "n1");
+  assert.equal(
+    byId.get(`${THREAD}:pi:task-1:process:p2`)!.parentId,
+    `${THREAD}:pi:task-1:process:p1`,
+  );
+  assert.equal(
+    byId.get(`${THREAD}:pi:task-1:process:p3`)!.parentId,
+    `${THREAD}:pi:task-1:process:p2`,
+  );
+  // Every node appears after the node it hangs from.
+  merged.forEach((entry, index) => {
+    if (entry.parentId === null) return;
+    const parent = ids.indexOf(entry.parentId);
+    if (parent !== -1) assert.ok(parent < index, `${entry.id} before its parent`);
+  });
+  const root = byId.get(`${THREAD}:pi:task-1:process:p1`)!;
+  assert.equal(root.kind, "tool");
+  assert.equal(root.threadId, THREAD);
+  assert.equal(root.meta.piWorkerId, "task-1");
+  assert.equal(root.meta.piProcessId, "p1");
+  assert.equal(root.meta.kind, "process");
+  assert.equal(root.meta.pid, "4321");
+  assert.equal(root.label, "npm test");
+  assert.match(root.sublabel!, /PID 4321/);
+  assert.match(root.sublabel!, /running/);
+  assert.equal(root.input, "npm test");
+  assert.match(root.output!, /running tests/);
+});
+
+test("process nodes hang off a worker the graph added itself", () => {
+  const merged = mergePiWorkers(
+    [threadNode()],
+    THREAD,
+    snapshotOf([worker({ id: "task-9", processes: [proc({ id: "p1" })] })]),
+  );
+  assert.equal(merged[2]!.parentId, `${THREAD}:pi:task-9`);
+});
+
+test("a process node is never mistaken for the worker's own delegation", () => {
+  const nodes = [threadNode(), node({ id: "n1" })];
+  const snapshot = () =>
+    snapshotOf([worker({ id: "task-1", processes: [proc({ id: "p1" })] })]);
+  mergePiWorkers(nodes, THREAD, snapshot());
+  const again = mergePiWorkers(nodes, THREAD, snapshot());
+  assert.deepEqual(
+    again.map((entry) => entry.id),
+    [THREAD, "n1", `${THREAD}:pi:task-1:process:p1`],
+  );
+  const processNode = again[2]!;
+  assert.equal(processNode.parentId, "n1");
+  assert.equal(processNode.kind, "tool");
+  assert.equal(processNode.meta.kind, "process");
+});
+
+test("never exports a process log path", () => {
+  const merged = mergePiWorkers(
+    [threadNode()],
+    THREAD,
+    snapshotOf([
+      worker({
+        id: "task-1",
+        processes: [
+          proc({
+            id: "p1",
+            logFile: "/storage/thr_demo/pi-pi/processes/p1.log",
+            logTruncated: true,
+          }),
+        ],
+      }),
+    ]),
+  );
+  assert.doesNotMatch(JSON.stringify(merged), /\/storage\/|logFile/);
+});
+
+test("two processes that reused one pid stay two nodes", () => {
+  const merged = mergePiWorkers(
+    [threadNode()],
+    THREAD,
+    snapshotOf([
+      worker({
+        id: "task-1",
+        processes: [
+          proc({ id: "p1", pid: 777, status: "exited", exitCode: 0, endedAt: HEARTBEAT }),
+          proc({ id: "p2", pid: 777 }),
+        ],
+      }),
+    ]),
+  );
+  assert.deepEqual(
+    merged.slice(2).map((entry) => entry.id),
+    [`${THREAD}:pi:task-1:process:p1`, `${THREAD}:pi:task-1:process:p2`],
+  );
+  assert.deepEqual(
+    merged.slice(2).map((entry) => entry.status),
+    ["done", "running"],
+  );
+});
+
+test("maps each process status, and a missing exit code is unknown rather than 0", () => {
+  const merged = mergePiWorkers(
+    [threadNode()],
+    THREAD,
+    snapshotOf([
+      worker({
+        id: "task-1",
+        status: "completed",
+        settledAt: HEARTBEAT,
+        processes: [
+          proc({ id: "a", status: "running" }),
+          proc({ id: "b", status: "exited", exitCode: 0, endedAt: HEARTBEAT }),
+          proc({ id: "c", status: "exited", endedAt: HEARTBEAT }),
+          proc({ id: "d", status: "failed", exitCode: null, signal: "SIGKILL" }),
+          proc({ id: "e", status: "unknown" }),
+        ],
+      }),
+    ]),
+  );
+  const processes = merged.slice(2);
+  assert.deepEqual(
+    processes.map((entry) => entry.status),
+    ["running", "done", "done", "error", "idle"],
+  );
+  assert.deepEqual(
+    processes.map((entry) => entry.meta.exit),
+    [undefined, "0", "unknown", "unknown", undefined],
+  );
+  assert.equal(processes[3]!.meta.signal, "SIGKILL");
+  assert.equal(processes[4]!.meta.status, "unknown");
+});
+
+test("a done worker with a live process wakes the thread but stays done", () => {
+  const project: GraphNode = { ...threadNode(), id: "project:p1", parentId: "root", kind: "project", threadId: null };
+  const root: GraphNode = { ...project, id: "root", parentId: null, kind: "root" };
+  const merged = mergePiWorkers(
+    [root, project, threadNode("idle")],
+    THREAD,
+    snapshotOf([
+      worker({
+        id: "task-1",
+        status: "completed",
+        settledAt: HEARTBEAT,
+        processes: [proc({ id: "p1", status: "running" })],
+      }),
+    ]),
+  );
+  assert.deepEqual(
+    merged.slice(0, 3).map((entry) => entry.status),
+    ["running", "running", "running"],
+  );
+  const workerNode = merged[3]!;
+  assert.equal(workerNode.status, "done");
+  assert.equal(workerNode.meta["active processes"], "1");
+  assert.equal(merged[4]!.status, "running");
+});
+
+test("a stale snapshot leaves a running process interrupted, and wakes nothing", () => {
+  const merged = mergePiWorkers(
+    [threadNode("idle")],
+    THREAD,
+    snapshotOf(
+      [
+        worker({
+          id: "task-1",
+          status: "completed",
+          settledAt: HEARTBEAT,
+          processes: [proc({ id: "p1", status: "running" })],
+        }),
+      ],
+      { stale: true },
+    ),
+  );
+  assert.equal(merged[0]!.status, "idle");
+  assert.equal(merged[2]!.status, "interrupted");
+  assert.equal(merged[2]!.meta.state, "stale");
+});
+
+test("drops a process it cannot trust, keeps the rest of the worker", async () => {
+  const api = fakeApi(
+    stateJson({
+      workers: [
+        worker({
+          id: "task-1",
+          processes: [
+            proc({ id: "bad-pid", pid: -1 }),
+            proc({ id: "nan-pid", pid: Number.NaN }),
+            proc({ id: "x".repeat(200) }),
+            proc({ id: "no-status", status: "zombie" as PiProcess["status"] }),
+            proc({ id: "ok" }),
+          ],
+        }),
+      ],
+    }),
+  );
+  const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
+  assert.deepEqual(
+    snapshot!.state.workers[0]!.processes!.map((entry) => entry.id),
+    ["ok"],
+  );
+  assert.deepEqual(api.warnings, []);
+});
+
+test("keeps a process whose metrics make no sense, without them", async () => {
+  const api = fakeApi(
+    stateJson({
+      workers: [
+        worker({
+          id: "task-1",
+          processes: [
+            proc({ id: "p1", cpuPercent: -4, rssBytes: Number.POSITIVE_INFINITY, sampledAt: "soon" as unknown as number }),
+            proc({ id: "p2", cpuPercent: 12.5, rssBytes: 48 * 1024 * 1024, sampledAt: HEARTBEAT }),
+          ],
+        }),
+      ],
+    }),
+  );
+  const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
+  const processes = snapshot!.state.workers[0]!.processes!;
+  assert.deepEqual(processes.map((entry) => entry.id), ["p1", "p2"]);
+  assert.equal(processes[0]!.cpuPercent, undefined);
+  assert.equal(processes[0]!.rssBytes, undefined);
+  assert.equal(processes[0]!.sampledAt, undefined);
+  const merged = mergePiWorkers([threadNode()], THREAD, { ...snapshotOf([]), state: snapshot!.state });
+  const measured = merged[3]!;
+  assert.equal(measured.meta.cpu, "12.5%");
+  assert.match(measured.meta.rss!, /48/);
+  assert.match(measured.sublabel!, /48/);
+  assert.ok(measured.sublabel!.length <= 80);
+  assert.equal(merged[2]!.meta.cpu, undefined);
+});
+
+test("a missing or circular process parent still leaves a tree", () => {
+  const merged = mergePiWorkers(
+    [threadNode()],
+    THREAD,
+    snapshotOf([
+      worker({
+        id: "task-1",
+        processes: [
+          proc({ id: "orphan", rootId: "gone", parentId: "gone" }),
+          proc({ id: "self", parentId: "self" }),
+          proc({ id: "a", parentId: "b" }),
+          proc({ id: "b", parentId: "a" }),
+        ],
+      }),
+    ]),
+  );
+  const ids = new Set(merged.map((entry) => entry.id));
+  const parentOf = new Map(merged.map((entry) => [entry.id, entry.parentId]));
+  assert.equal(merged.length, 6);
+  for (const entry of merged.slice(2)) {
+    assert.ok(entry.parentId !== null && ids.has(entry.parentId), `${entry.id} is an orphan`);
+    const seen = new Set<string>([entry.id]);
+    let up = entry.parentId;
+    while (up != null && parentOf.has(up)) {
+      assert.ok(!seen.has(up), `${entry.id} is in a cycle`);
+      seen.add(up);
+      up = parentOf.get(up)!;
+    }
+  }
+});
+
+test("bounds how many processes one worker contributes", async () => {
+  const many = Array.from({ length: 400 }, (_, index) => proc({ id: `p${index}` }));
+  const api = fakeApi(stateJson({ workers: [worker({ id: "task-1", processes: many })] }));
+  const snapshot = await at(HEARTBEAT, () => createPiReader(api).read(THREAD));
+  assert.equal(snapshot!.state.workers[0]!.processes!.length, 128);
+  const merged = mergePiWorkers([threadNode()], THREAD, snapshot!);
+  assert.equal(merged.length, 130);
+});
+
+test("says what a process printed, bounded, with why it may be missing", () => {
+  const merged = mergePiWorkers(
+    [threadNode()],
+    THREAD,
+    snapshotOf([
+      worker({
+        id: "task-1",
+        processWarning: "process sampling unavailable",
+        processes: [
+          proc({
+            id: "p1",
+            outputTail: "y".repeat(4000),
+            outputCapture: "unavailable",
+            warning: "could not sample",
+            status: "failed",
+            exitCode: 2,
+            endedAt: HEARTBEAT,
+          }),
+        ],
+      }),
+    ]),
+  );
+  const added = merged[2]!;
+  assert.ok(added.output!.length <= 1500);
+  assert.match(added.output!, /exit 2/);
+  assert.match(added.output!, /could not sample/);
+  assert.equal(added.meta.outputCapture, "unavailable");
+  assert.equal(merged[1]!.meta["process warning"], "process sampling unavailable");
+});
+
+test("puts process timestamps on the reader's clock", () => {
+  const merged = mergePiWorkers(
+    [threadNode()],
+    THREAD,
+    snapshotOf(
+      [
+        worker({
+          id: "task-1",
+          processes: [
+            proc({ id: "p1", status: "exited", exitCode: 0, startedAt: HEARTBEAT, endedAt: HEARTBEAT + 1_000 }),
+          ],
+        }),
+      ],
+      { clockOffsetMs: 10_000 },
+    ),
+  );
+  assert.equal(merged[2]!.startedAt, HEARTBEAT + 10_000);
+  assert.equal(merged[2]!.completedAt, HEARTBEAT + 11_000);
 });
 
 test("does nothing when there are no workers", () => {

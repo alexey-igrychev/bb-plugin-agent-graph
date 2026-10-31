@@ -9,8 +9,12 @@ adds read-only live output and pi-pi worker activity. It requires **bb 0.47.1 or
 The upstream plugin and marketplace listing below are unchanged; this fork is
 not installed automatically, and no upstream PR has been opened.
 
-Select a thread, tool call or subagent to open **Live output** in its details.
-Pause/resume reading or toggle **Follow** to control auto-scroll. The panel
+Select a thread, tool call, subagent or process to open **Live output** in its
+details. Entries distinguish messages, reasoning, commands, tools, stdout and
+stderr, with recorded timestamps and status/exit badges where available.
+Expand the panel for longer logs; search retained entries, filter by type,
+toggle wrapping or copy the filtered output. **Follow** stops when you scroll
+up and can be resumed explicitly. Pause/resume reading independently. The panel
 reads BB's normalized events incrementally; it shows command output, messages
 and tool results as the provider supplies them. Some providers only send a
 result when a tool finishes: this is not an interactive terminal or a promise
@@ -20,8 +24,10 @@ whole thread's event stream.
 Only the selected log is followed. Active targets poll every second; finished
 targets refresh every ten seconds after catch-up. Polling stops while paused,
 hidden or unmounted. Failed reads retain the last visible text. The panel keeps the
-latest 200,000 characters, with an explicit notice when older output was
-dropped; unusually large entries are also labelled as truncated. Provider-side
+latest 200,000 characters and at most 1,000 entries, with an explicit notice
+when older output was dropped; unusually large entries are also labelled as
+truncated. The header distinguishes catching up, following, paused and failed
+reads, and shows the time of the last successful read. Provider-side
 retention limits still apply.
 
 ### pi-pi workers
@@ -55,8 +61,39 @@ latest 64 snapshots, independently of active descendants. More than 1,000
 simultaneously tracked items can drop old descendant tracking, with an explicit
 warning.
 
-No worker commands, process attachment, terminal input, global configuration
-changes or automatic installation are included.
+### Processes launched by pi-pi workers
+
+With the accompanying pi-pi patch, a worker's process nodes appear beneath it:
+root command → sampled child → sampled grandchild. Details include PID, state,
+start/end time, observed exit code/signal, sampled CPU percentage and resident
+memory. A worker can finish while its background process keeps its thread
+active; the worker itself remains completed. Missing sampled exit codes are
+shown as unknown, never as success.
+
+The producer observes Node's asynchronous child-process notifications inside
+that worker's tool execution context. It does not replace the shell runner or
+change quoting, cwd, environment, permissions, timeouts or cancellation. A
+bounded POSIX `ps` sampler reads metadata without command arguments or process
+environments, then retains only ownership-filtered rows. PID/start-time checks
+and a short process-group grace reduce accidental reassociation. This is
+best-effort observation: synchronous/native or remote spawns, very short-lived
+descendants, and daemons that escape before discovery can be absent. Windows
+can report directly observed roots, without POSIX resource/tree sampling.
+CPU readings are the operating system's estimates, not a profiling trace.
+
+Selecting a process follows its private, bounded JSONL log through the same
+host-aware API. Known shell pipes are observed only when the SDK already reads
+them; arbitrary tools' streams are not put into flowing mode. Stdout/stderr are
+separate where actually captured. Descendants share the root command's streams
+and are explicitly labelled as shared, not as private per-PID output. Ignored
+or redirected output is reported unavailable; the plugin never guesses and
+tails arbitrary files. Process capture stops retaining output at 1 MiB per root
+and 16 MiB per producer session, with a visible cap marker; metadata continues.
+Only the selected process log is read, with a 2 MiB consumer input limit.
+
+No new process-control commands, attachment, terminal input or automatic
+installation are included. Process trees and metrics follow the same visible,
+selected-target polling policy as the rest of the graph.
 
 ### Test this checkout
 

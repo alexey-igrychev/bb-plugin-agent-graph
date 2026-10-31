@@ -26,6 +26,9 @@ const MAX_CACHE = 200;
 /** No probe of a possibly unreachable host may hold a graph build longer. */
 const READ_TIMEOUT_MS = 10_000;
 const MAX_PATH = 4096;
+/** A worker shows the processes it is running, not every one it ever ran. */
+const MAX_PROCESSES = 128;
+const COMMAND_CAP = 60;
 
 const piWorkerStatusSchema = z.enum([
   "queued",
@@ -43,6 +46,41 @@ function bounded(cap: number) {
     .string()
     .transform((value) => (value.length > cap ? `${value.slice(0, cap - 1)}…` : value));
 }
+
+const piProcessStatusSchema = z.enum(["running", "exited", "failed", "unknown"]);
+
+/** A sampled number: a negative or non-finite one is no measurement, so it is dropped. */
+const metric = z.number().min(0).optional().catch(undefined);
+
+// A child process a worker started. Its id is pi-pi's own, independent of the
+// pid the OS may hand to another process once this one exits. A field this
+// version cannot trust is dropped where the node can do without it; the rest
+// (id, pid, status) drop the whole entry rather than invent a process.
+const piProcessSchema = z.object({
+  id: z.string().min(1).max(120),
+  rootId: z.string().min(1).max(120),
+  parentId: z.string().min(1).max(120).optional().catch(undefined),
+  toolCallId: bounded(120).default(""),
+  toolName: bounded(80).default(""),
+  command: bounded(TEXT_CAP).default(""),
+  pid: z.number().int().positive(),
+  ppid: z.number().int().positive().optional().catch(undefined),
+  startedAt: z.number(),
+  endedAt: z.number().optional().catch(undefined),
+  status: piProcessStatusSchema,
+  exitCode: z.number().int().nullable().optional().catch(undefined),
+  signal: bounded(40).nullable().optional().catch(undefined),
+  cpuPercent: metric,
+  rssBytes: metric,
+  sampledAt: z.number().optional().catch(undefined),
+  outputTail: bounded(TEXT_CAP).default(""),
+  // Server-side only, like a worker's transcript: the frontend gets process
+  // ids, never host paths.
+  logFile: z.string().min(1).max(MAX_PATH).optional().catch(undefined),
+  logTruncated: z.boolean().optional().catch(undefined),
+  outputCapture: z.enum(["pipes", "unavailable", "shared"]).optional().catch(undefined),
+  warning: bounded(200).optional().catch(undefined),
+});
 
 const piWorkerSchema = z.object({
   // Never clipped: a shortened id would collide with another worker's.
@@ -74,6 +112,17 @@ const piWorkerSchema = z.object({
   // path would name a different file — and dropped if it is implausibly long.
   // It stays server-side: the frontend gets worker ids, never host paths.
   transcriptFile: z.string().min(1).max(MAX_PATH).optional().catch(undefined),
+  // Absent from files an older pi-pi wrote, and from a worker that started no
+  // process; a shape this version does not know costs the processes, not the
+  // worker.
+  processes: z
+    .array(piProcessSchema.nullable().catch(null))
+    .transform((list) =>
+      list.filter((entry) => entry !== null).slice(0, MAX_PROCESSES),
+    )
+    .optional()
+    .catch(undefined),
+  processWarning: bounded(200).optional().catch(undefined),
 });
 
 const piStateSchema = z.object({
@@ -98,6 +147,7 @@ const piStateSchema = z.object({
 });
 
 export type PiWorker = z.infer<typeof piWorkerSchema>;
+export type PiProcess = z.infer<typeof piProcessSchema>;
 export type PiWorkerStatus = z.infer<typeof piWorkerStatusSchema>;
 export type PiState = z.infer<typeof piStateSchema>;
 
@@ -270,6 +320,8 @@ export function createPiReader(bb: PiReaderApi): PiReader {
  */
 function workerIdFrom(node: GraphNode): string | null {
   if (node.kind !== "tool" && node.kind !== "subagent") return null;
+  // A process node names the worker it belongs to; it did not launch it.
+  if (node.meta.piProcessId !== undefined) return null;
   const known = node.meta.piWorkerId;
   if (known !== undefined && known.length > 0) return known;
   const receipt = /\bStarted worker (\S+) \(/.exec(node.output ?? "");
@@ -309,6 +361,9 @@ function preview(worker: PiWorker): string | null {
 }
 
 function workerMeta(worker: PiWorker, stale: boolean): Record<string, string> {
+  const active = (worker.processes ?? []).filter(
+    (entry) => entry.status === "running",
+  ).length;
   return {
     piWorkerId: worker.id,
     type: worker.type,
@@ -320,8 +375,108 @@ function workerMeta(worker: PiWorker, stale: boolean): Record<string, string> {
     ...(worker.tokens ? { tokens: String(worker.tokens) } : {}),
     ...(worker.question ? { question: clip(worker.question, LABEL_CAP) } : {}),
     ...(worker.result ? { result: worker.result.status } : {}),
+    ...(active ? { "active processes": String(active) } : {}),
+    ...(worker.processWarning
+      ? { "process warning": clip(worker.processWarning, LABEL_CAP) }
+      : {}),
     ...(stale ? { state: "stale" } : {}),
   };
+}
+
+function processStatus(process: PiProcess, stale: boolean): NodeStatus {
+  switch (process.status) {
+    case "running":
+      // Nobody is sampling this process any more, so what it is doing now is
+      // not known: calling it running would claim a liveness nothing checked.
+      return stale ? "interrupted" : "running";
+    case "exited":
+      return "done";
+    case "failed":
+      return "error";
+    default:
+      return "idle";
+  }
+}
+
+function megabytes(bytes: number): string {
+  const mb = bytes / 1_048_576;
+  return `${mb >= 10 ? Math.round(mb) : Math.round(mb * 10) / 10} MB`;
+}
+
+/**
+ * How a sampled descendant left. pi-pi only learns an exit code for a process
+ * it waited on, so a settled one without a code exited in a way nobody saw —
+ * which is not the same as exiting 0.
+ */
+function exitOf(process: PiProcess): string | null {
+  if (process.status !== "exited" && process.status !== "failed") return null;
+  return process.exitCode === undefined || process.exitCode === null
+    ? "unknown"
+    : String(process.exitCode);
+}
+
+function processMeta(
+  worker: PiWorker,
+  process: PiProcess,
+  stale: boolean,
+  offsetMs: number,
+): Record<string, string> {
+  const exit = exitOf(process);
+  return {
+    piWorkerId: worker.id,
+    piProcessId: process.id,
+    kind: "process",
+    pid: String(process.pid),
+    ...(process.ppid !== undefined ? { ppid: String(process.ppid) } : {}),
+    rootId: process.rootId,
+    ...(process.toolCallId ? { toolCallId: process.toolCallId } : {}),
+    ...(process.toolName ? { tool: process.toolName } : {}),
+    ...(process.command ? { command: clip(process.command, LABEL_CAP) } : {}),
+    status: process.status,
+    ...(exit !== null ? { exit } : {}),
+    ...(process.signal ? { signal: process.signal } : {}),
+    ...(process.cpuPercent !== undefined
+      ? { cpu: `${Math.round(process.cpuPercent * 10) / 10}%` }
+      : {}),
+    ...(process.rssBytes !== undefined ? { rss: megabytes(process.rssBytes) } : {}),
+    ...(process.sampledAt !== undefined
+      ? { sampledAt: String(local(process.sampledAt, offsetMs)) }
+      : {}),
+    ...(process.outputCapture ? { outputCapture: process.outputCapture } : {}),
+    ...(process.warning ? { warning: clip(process.warning, LABEL_CAP) } : {}),
+    ...(stale ? { state: "stale" } : {}),
+  };
+}
+
+function processSublabel(process: PiProcess): string {
+  const parts = [`PID ${process.pid}`, process.status];
+  const exit = exitOf(process);
+  if (exit !== null) parts.push(`exit ${exit}`);
+  if (process.signal) parts.push(process.signal);
+  if (process.cpuPercent !== undefined)
+    parts.push(`${Math.round(process.cpuPercent)}% CPU`);
+  if (process.rssBytes !== undefined) parts.push(megabytes(process.rssBytes));
+  return clip(parts.join(" · "), LABEL_CAP);
+}
+
+const CAPTURE_NOTE: Record<NonNullable<PiProcess["outputCapture"]>, string> = {
+  pipes: "",
+  unavailable: "output was not captured",
+  shared: "output went to the agent's own stream",
+};
+
+function processOutput(process: PiProcess): string | null {
+  const notes: string[] = [];
+  const exit = exitOf(process);
+  if (exit !== null) notes.push(`exit ${exit}${process.signal ? ` (${process.signal})` : ""}`);
+  if (process.logTruncated) notes.push("output truncated");
+  const capture = process.outputCapture ? CAPTURE_NOTE[process.outputCapture] : "";
+  if (capture) notes.push(capture);
+  if (process.warning) notes.push(process.warning);
+  const suffix = notes.length > 0 ? `\n${notes.join("; ")}` : "";
+  const tail = clip(process.outputTail, TEXT_CAP - suffix.length);
+  const text = `${tail}${suffix}`.trim();
+  return text.length > 0 ? text : null;
 }
 
 function sublabelFor(worker: PiWorker, status: NodeStatus): string {
@@ -397,14 +552,96 @@ export function mergePiWorkers(
       meta: workerMeta(worker, stale),
     });
   }
+  addProcesses(nodes, threadId, snapshot, taken);
   const live = [...statuses.values()];
+  // A worker that handed back its result may still own a process that is
+  // running: the thread is working either way.
+  const working =
+    !stale &&
+    snapshot.state.workers.some((worker) =>
+      (worker.processes ?? []).some((entry) => entry.status === "running"),
+    );
   const wake: NodeStatus | null = live.includes("waiting")
     ? "waiting"
-    : live.includes("running") || live.includes("queued")
+    : live.includes("running") || live.includes("queued") || working
       ? "running"
       : null;
   if (wake !== null) wakeAncestors(nodes, threadId, wake);
   return nodes;
+}
+
+/**
+ * Hangs each worker's processes under it: a root process under the worker's
+ * own node, a descendant under the process that started it. A parent this
+ * snapshot does not carry, or one that leads back into a cycle, falls back to
+ * the worker — the graph is drawn as a tree, so there must be no other shape.
+ */
+function addProcesses(
+  nodes: GraphNode[],
+  threadId: string,
+  snapshot: PiSnapshot,
+  taken: Map<string, GraphNode>,
+): void {
+  const { stale, clockOffsetMs } = snapshot;
+  const present = new Set(nodes.map((node) => node.id));
+  for (const worker of snapshot.state.workers) {
+    const processes = worker.processes ?? [];
+    if (processes.length === 0) continue;
+    const ownerId = taken.get(worker.id)?.id ?? `${threadId}:pi:${worker.id}`;
+    const nodeIdFor = (processId: string) =>
+      `${threadId}:pi:${worker.id}:process:${processId}`;
+    const byProcessId = new Map(processes.map((entry) => [entry.id, entry]));
+    const parentOf = new Map<string, PiProcess | null>(
+      processes.map((entry) => [entry.id, parentProcess(entry, byProcessId)]),
+    );
+    const depths = new Map<string, number>();
+    const depthOf = (entry: PiProcess): number => {
+      const known = depths.get(entry.id);
+      if (known !== undefined) return known;
+      const parent = parentOf.get(entry.id) ?? null;
+      // `parentOf` is already cycle-free, so this recursion terminates.
+      const depth = parent === null ? 0 : depthOf(parent) + 1;
+      depths.set(entry.id, depth);
+      return depth;
+    };
+    const ordered = [...processes].sort((a, b) => depthOf(a) - depthOf(b));
+    for (const entry of ordered) {
+      const id = nodeIdFor(entry.id);
+      if (present.has(id)) continue;
+      present.add(id);
+      const parent = parentOf.get(entry.id) ?? null;
+      nodes.push({
+        id,
+        parentId: parent === null ? ownerId : nodeIdFor(parent.id),
+        kind: "tool",
+        label: clip(entry.command || entry.toolName, COMMAND_CAP) || `PID ${entry.pid}`,
+        sublabel: processSublabel(entry),
+        status: processStatus(entry, stale),
+        threadId,
+        startedAt: local(entry.startedAt, clockOffsetMs),
+        completedAt: local(entry.endedAt, clockOffsetMs),
+        input: clip(entry.command, TEXT_CAP) || null,
+        output: processOutput(entry),
+        meta: processMeta(worker, entry, stale, clockOffsetMs),
+      });
+    }
+  }
+}
+
+/** The process that started this one, or null when nothing in the snapshot did. */
+function parentProcess(
+  process: PiProcess,
+  byProcessId: Map<string, PiProcess>,
+): PiProcess | null {
+  const parent = process.parentId === undefined ? undefined : byProcessId.get(process.parentId);
+  if (parent === undefined) return null;
+  const seen = new Set([process.id]);
+  for (let up: PiProcess | undefined = parent; up !== undefined; ) {
+    if (seen.has(up.id)) return null;
+    seen.add(up.id);
+    up = up.parentId === undefined ? undefined : byProcessId.get(up.parentId);
+  }
+  return parent;
 }
 
 /** The thread and the project/root above it are working while a worker is. */

@@ -128,7 +128,7 @@ function categoryOf(node: GraphNode): Category {
       return node.kind;
     case "tool": {
       const work = node.meta.kind ?? "";
-      if (work === "command" || node.label === "Bash") return "shell";
+      if (work === "command" || work === "process" || node.label === "Bash") return "shell";
       if (/file.?change/.test(work) || EDIT_TOOLS.has(node.label)) return "edit";
       if (/web/.test(work) || WEB_TOOLS.has(node.label)) return "web";
       if (/read|search|list/.test(work) || READ_TOOLS.has(node.label)) return "read";

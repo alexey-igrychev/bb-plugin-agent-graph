@@ -21,6 +21,7 @@ import { AgentGraphView } from "./graph";
 import { isActive } from "./layout";
 import { LivePanel } from "./live-panel";
 import { hasRunningPiWork, liveTargetFor } from "./live-stream";
+import { liveCaptionFor } from "./live-view";
 import {
   GRAPH_CHANGED,
   readStorage,
@@ -53,7 +54,14 @@ function renderLive(node: GraphNode) {
   const target = liveTargetFor(node);
   if (target === null) return null;
   // Keyed by node so a new selection never inherits the old panel's controls.
-  return <LivePanel key={node.id} {...target} active={isActive(node.status)} />;
+  return (
+    <LivePanel
+      key={node.id}
+      {...target}
+      caption={liveCaptionFor(node)}
+      active={isActive(node.status)}
+    />
+  );
 }
 
 /** The graph for one thread (or the overview), refetched on live changes. */
