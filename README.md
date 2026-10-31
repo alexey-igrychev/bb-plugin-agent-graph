@@ -88,7 +88,7 @@ separate where actually captured. Descendants share the root command's streams
 and are explicitly labelled as shared, not as private per-PID output. Ignored
 or redirected output is reported unavailable; the plugin never guesses and
 tails arbitrary files. Process capture stops retaining output at 1 MiB per root
-and 16 MiB per producer session, with a visible cap marker; metadata continues.
+and 16 MiB per producer runtime, with a visible cap marker; metadata continues.
 Only the selected process log is read, with a 2 MiB consumer input limit.
 
 No new process-control commands, attachment, terminal input or automatic
