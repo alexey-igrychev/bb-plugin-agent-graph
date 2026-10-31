@@ -10,7 +10,8 @@ function harness(events: unknown[] = [], source: WorkerSource | null = null) {
   const api: LiveApi = {
     threads: { events: { list: async (args) => {
       calls.push(args);
-      return events.filter((e) => (e as {seq:number}).seq > Number(args.afterSeq ?? 0)).slice(0, 200);
+      assert.ok(Number(args.limit) <= 100, "Thread event limit cannot exceed 100");
+      return events.filter((e) => (e as {seq:number}).seq > Number(args.afterSeq ?? 0)).slice(0, Number(args.limit));
     } } },
     files: { read: async (args) => { calls.push(args); return { content: file, contentEncoding: "utf8" }; } },
   };
@@ -116,7 +117,7 @@ test("long-lived streams shed bounded cursor tracking instead of retrying foreve
   const events=Array.from({length:1200},(_,i)=>event(i+1,"item/agentMessage/delta",{itemId:`item-${i}`,delta:"x"}));
   const h=harness(events);
   let cursor:string|null=null;let warned=false;let text="";
-  for(let i=0;i<6;i++){
+  for(let i=0;i<12;i++){
     const page=await h.read({...input,cursor});cursor=page.cursor;warned ||= page.warning!==null;text+=page.text;
     assert.ok(cursor===null || cursor.length<=100000);
   }
@@ -133,7 +134,7 @@ test("completed siblings do not evict a still-running descendant or inflate curs
   }
   events.push(event(1402,"item/commandExecution/outputDelta",{itemId:"long-command",delta:"still running descendant"}));
   const h=harness(events);let cursor:string|null=null;let text="";
-  for(let i=0;i<10;i++){
+  for(let i=0;i<20;i++){
     const page=await h.read({...input,itemId:"agent",cursor});cursor=page.cursor;text+=page.text;
     assert.equal(page.warning,null);assert.ok(cursor!.length<20000);
     if(!page.hasMore)break;
@@ -144,7 +145,7 @@ test("completed siblings do not evict a still-running descendant or inflate curs
 test("dedupe stays small even when many native delegations finish", async () => {
   const events=Array.from({length:700},(_,i)=>event(i+1,"item/delegation/completed",{item:{id:`agent-${i}`,type:"delegation",summary:"done"}}));
   const h=harness(events);let cursor:string|null=null;
-  for(let i=0;i<4;i++){
+  for(let i=0;i<8;i++){
     const page=await h.read({...input,cursor});cursor=page.cursor;
     assert.equal(page.warning,null);assert.ok(cursor!.length<10000);
     const decoded=JSON.parse(Buffer.from(cursor!,"base64url").toString());
@@ -166,7 +167,10 @@ test("pages through busy event streams without skipping the last event", async (
   const h = harness(events);
   const first = await h.read(input);
   assert.equal(first.hasMore,true);
-  const last = await h.read({...input,cursor:first.cursor});
+  const second = await h.read({...input,cursor:first.cursor});
+  assert.equal(second.text,Array.from({length:100},(_,i)=>String(i+101)+",").join(""));
+  assert.equal(second.hasMore,true);
+  const last = await h.read({...input,cursor:second.cursor});
   assert.equal(last.text,"201,");
   assert.equal(last.hasMore,false);
 });

@@ -27,7 +27,8 @@ export interface WorkerSource {
   state: { workers: Array<{ id: string; transcriptFile?: string; outputTail: string; status?: string }> };
 }
 
-const PAGE_SIZE = 200;
+// BB's event API rejects larger pages.
+const PAGE_SIZE = 100;
 const TEXT_LIMIT = 64_000;
 const TRANSCRIPT_LIMIT = 21 * 1024 * 1024;
 const cursorSchema = z.object({

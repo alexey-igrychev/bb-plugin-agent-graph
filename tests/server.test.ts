@@ -149,7 +149,10 @@ function host(options: { workers?: Array<Record<string, unknown>>; events?: unkn
         list: async (args?: { parentThreadId?: string }) => (args?.parentThreadId === undefined ? [piThread, secondThread] : []),
         timeline: async ({ threadId }: { threadId: string }) => ({ rows: threadId === PI_THREAD ? piRows() : [] }),
         storageLocation: async ({ threadId }: { threadId: string }) => ({ hostId: "host-1", storageRootPath: `/storage/${threadId}` }),
-        events: { list: async () => options.events ?? [] },
+        events: { list: async ({ limit }: { limit?: string }) => {
+          assert.ok(Number(limit ?? 100) <= 100, "Thread event limit cannot exceed 100");
+          return (options.events ?? []).slice(0, Number(limit ?? 100));
+        } },
       },
       files: {
         read: async ({ path }: { path: string }) => {
